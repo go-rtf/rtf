@@ -120,6 +120,26 @@ func writeInline(b *strings.Builder, in richdoc.Inline) {
 		if n.Format == "rtf" {
 			b.WriteString(n.Text)
 		}
+	case richdoc.Footnote:
+		// A superscript auto-number mark at the reference site, then the note
+		// body as its own group; Parse reads the group back into the blocks.
+		b.WriteString("{\\super\\chftn}{\\footnote ")
+		for _, blk := range n.Blocks {
+			writeBlock(b, blk)
+		}
+		b.WriteString("}")
+	case richdoc.Anchor:
+		b.WriteString("{\\*\\bkmkstart " + n.ID + "}")
+		writeInlines(b, n.Inlines)
+		b.WriteString("{\\*\\bkmkend " + n.ID + "}")
+	case richdoc.CrossRef:
+		inst := "REF " + n.Target
+		if n.Kind == richdoc.RefCite {
+			inst = "CITATION " + n.Target
+		}
+		b.WriteString("{\\field{\\*\\fldinst " + inst + "}{\\fldrslt ")
+		writeInlines(b, n.Inlines)
+		b.WriteString("}}")
 	}
 }
 

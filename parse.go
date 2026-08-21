@@ -62,9 +62,15 @@ type textSeg struct {
 type breakSeg struct{}
 type inlineSeg struct{ inline richdoc.Inline }
 
-func (*textSeg) isSeg()  {}
-func (breakSeg) isSeg()  {}
-func (inlineSeg) isSeg() {}
+// anchorStartSeg records an open {\*\bkmkstart name}. The matching
+// {\*\bkmkend name} wraps the segments emitted in between into an
+// [richdoc.Anchor]; an unmatched start becomes a point Anchor with no inlines.
+type anchorStartSeg struct{ id string }
+
+func (*textSeg) isSeg()       {}
+func (breakSeg) isSeg()       {}
+func (inlineSeg) isSeg()      {}
+func (anchorStartSeg) isSeg() {}
 
 // Parse converts a practical subset of RTF into a [richdoc.Document].
 func Parse(src []byte) (*richdoc.Document, error) {
@@ -170,9 +176,18 @@ func (p *parser) dispatchGroup(openOff int) error {
 	t := p.toks[p.i]
 	if t.kind == tSymbol && t.sval == "*" {
 		p.i++
-		if p.i < len(p.toks) && p.toks[p.i].kind == tWord && p.toks[p.i].sval == "pn" {
-			p.i++
-			return p.parsePN()
+		if p.i < len(p.toks) && p.toks[p.i].kind == tWord {
+			switch p.toks[p.i].sval {
+			case "pn":
+				p.i++
+				return p.parsePN()
+			case "bkmkstart":
+				p.i++
+				return p.parseBookmark(true)
+			case "bkmkend":
+				p.i++
+				return p.parseBookmark(false)
+			}
 		}
 		return p.skipGroup()
 	}
@@ -190,7 +205,8 @@ func (p *parser) dispatchGroup(openOff int) error {
 		case "pict":
 			return p.captureRaw(openOff)
 		case "footnote":
-			return p.captureRaw(openOff)
+			p.i++
+			return p.parseFootnote()
 		case "field":
 			p.i++
 			return p.parseField(openOff)
@@ -234,7 +250,7 @@ func (p *parser) skipGroup() error {
 }
 
 // captureRaw preserves a whole group verbatim as a RawInline, used for
-// pictures and footnotes which the model cannot represent losslessly.
+// pictures, which the model cannot represent losslessly.
 func (p *parser) captureRaw(openOff int) error {
 	end, err := p.consumeToClose()
 	if err != nil {
@@ -242,6 +258,63 @@ func (p *parser) captureRaw(openOff int) error {
 	}
 	p.segs = append(p.segs, inlineSeg{richdoc.RawInline{Format: "rtf", Text: string(p.src[openOff:end])}})
 	return nil
+}
+
+// parseFootnote parses a {\footnote …} group (its leading \footnote control
+// word already consumed) into an inline [richdoc.Footnote] holding the note's
+// paragraphs. The note body runs on a fresh paragraph flow so it never leaks
+// into the referencing paragraph; the surrounding formatting state is saved and
+// restored around it.
+func (p *parser) parseFootnote() error {
+	savedSegs, savedDB, savedSkip := p.segs, p.db, p.uniSkip
+	p.segs, p.db, p.uniSkip = nil, docBuilder{}, 0
+	p.pushState()
+	err := p.processGroup()
+	if len(p.segs) > 0 {
+		p.endParagraph()
+	}
+	p.popState()
+	p.db.flushList()
+	p.db.flushQuote()
+	blocks := p.db.blocks
+	p.segs, p.db, p.uniSkip = savedSegs, savedDB, savedSkip
+	if err != nil {
+		return err
+	}
+	p.segs = append(p.segs, inlineSeg{richdoc.Footnote{Blocks: blocks}})
+	return nil
+}
+
+// parseBookmark handles a {\*\bkmkstart name} or {\*\bkmkend name} group (its
+// leading control word already consumed). A start records an open anchor; an
+// end wraps the intervening segments into an [richdoc.Anchor].
+func (p *parser) parseBookmark(start bool) error {
+	name, err := p.collectGroupText()
+	if err != nil {
+		return err
+	}
+	id := strings.TrimSpace(name)
+	if start {
+		p.segs = append(p.segs, anchorStartSeg{id: id})
+		return nil
+	}
+	p.closeAnchor(id)
+	return nil
+}
+
+// closeAnchor pairs a {\*\bkmkend id} with the nearest preceding open
+// {\*\bkmkstart id}, replacing the run between them with a single Anchor. An end
+// with no matching start is dropped.
+func (p *parser) closeAnchor(id string) {
+	for k := len(p.segs) - 1; k >= 0; k-- {
+		as, ok := p.segs[k].(anchorStartSeg)
+		if !ok || as.id != id {
+			continue
+		}
+		inner := segsToInlines(p.segs[k+1:])
+		p.segs = append(p.segs[:k], inlineSeg{richdoc.Anchor{ID: id, Inlines: inner}})
+		return
+	}
 }
 
 // parsePN reads a {\*\pn ...} paragraph-numbering definition, marking the
@@ -421,11 +494,13 @@ func (p *parser) recordStyle(idx, outline int, name string, isChar bool) {
 	}
 }
 
-// parseField handles {\field{\*\fldinst HYPERLINK "url"}{\fldrslt text}}. A
-// recognised hyperlink becomes a Link; any other field is preserved verbatim.
+// parseField handles {\field{\*\fldinst INSTRUCTION …}{\fldrslt text}}. A
+// HYPERLINK instruction becomes a Link and a REF/PAGEREF instruction a
+// RefLabel CrossRef pointing at the bookmark; any other field is preserved
+// verbatim.
 func (p *parser) parseField(openOff int) error {
-	var url string
-	hasLink := false
+	var url, refTarget string
+	hasLink, hasRef := false, false
 	var result []richdoc.Inline
 	depth := 1
 	for p.i < len(p.toks) {
@@ -443,6 +518,8 @@ func (p *parser) parseField(openOff int) error {
 				depth--
 				if u, ok := parseHyperlink(inst); ok {
 					url, hasLink = u, true
+				} else if tgt, ok := parseRef(inst); ok {
+					refTarget, hasRef = tgt, true
 				}
 			case "fldrslt":
 				ins, err := p.collectInlines()
@@ -470,12 +547,18 @@ func (p *parser) parseField(openOff int) error {
 	if depth != 0 {
 		return ErrUnbalanced
 	}
-	if hasLink {
+	switch {
+	case hasLink:
 		if len(result) == 0 {
 			result = []richdoc.Inline{richdoc.Text{Value: url}}
 		}
 		p.segs = append(p.segs, inlineSeg{richdoc.Link{URL: url, Inlines: result}})
-	} else {
+	case hasRef:
+		if len(result) == 0 {
+			result = []richdoc.Inline{richdoc.Text{Value: refTarget}}
+		}
+		p.segs = append(p.segs, inlineSeg{richdoc.CrossRef{Target: refTarget, Kind: richdoc.RefLabel, Inlines: result}})
+	default:
 		p.segs = append(p.segs, inlineSeg{richdoc.RawInline{Format: "rtf", Text: string(p.src[openOff:p.toks[p.i-1].end])}})
 	}
 	return nil
@@ -539,6 +622,21 @@ func (p *parser) collectInlines() ([]richdoc.Inline, error) {
 		return nil, err
 	}
 	return ins, nil
+}
+
+// parseRef extracts the bookmark name from a REF or PAGEREF field instruction,
+// for example `REF _Ref42 \h` yields "_Ref42". Switches such as `\h` and
+// `\* MERGEFORMAT` after the name are ignored.
+func parseRef(inst string) (string, bool) {
+	f := strings.Fields(inst)
+	if len(f) < 2 {
+		return "", false
+	}
+	switch f[0] {
+	case "REF", "PAGEREF":
+		return f[1], true
+	}
+	return "", false
 }
 
 func parseHyperlink(inst string) (string, bool) {
@@ -740,6 +838,10 @@ func segsToInlines(segs []segment) []richdoc.Inline {
 			out = append(out, richdoc.LineBreak{})
 		case inlineSeg:
 			out = append(out, v.inline)
+		case anchorStartSeg:
+			// A bookmark start with no matching end in this run is a point
+			// anchor carrying no marked text.
+			out = append(out, richdoc.Anchor{ID: v.id})
 		}
 	}
 	return out

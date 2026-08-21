@@ -5,6 +5,7 @@ package rtf
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -45,6 +46,9 @@ func TestParseErrors(t *testing.T) {
 		{"truncated fldinst", `{\rtf1{\field{\*\fldinst HYPERLINK`, ErrUnbalanced},
 		{"truncated fldrslt", `{\rtf1{\field{\*\fldinst HYPERLINK "u"}{\fldrslt R`, ErrUnbalanced},
 		{"truncated field subgroup", `{\rtf1{\field{\xyz`, ErrUnbalanced},
+		{"truncated footnote", `{\rtf1 x{\footnote note`, ErrUnbalanced},
+		{"truncated bkmkstart", `{\rtf1{\*\bkmkstart name`, ErrUnbalanced},
+		{"truncated bkmkend", `{\rtf1{\*\bkmkend name`, ErrUnbalanced},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -256,6 +260,61 @@ func TestSegMarkers(t *testing.T) {
 	(&textSeg{}).isSeg()
 	breakSeg{}.isSeg()
 	inlineSeg{}.isSeg()
+	anchorStartSeg{}.isSeg()
+}
+
+// TestBookmarkEndWithoutStart covers a {\*\bkmkend} with no matching start,
+// which is dropped, leaving the surrounding text intact.
+func TestBookmarkEndWithoutStart(t *testing.T) {
+	d := mustParse(t, `{\rtf1 text{\*\bkmkend orphan} more\par}`)
+	if got := richdoc.PlainText(d); got != "text more" {
+		t.Fatalf("plaintext = %q, want %q", got, "text more")
+	}
+	for _, in := range d.Blocks[0].(richdoc.Paragraph).Inlines {
+		if _, ok := in.(richdoc.Anchor); ok {
+			t.Fatalf("unexpected Anchor for an unmatched bkmkend: %#v", d.Blocks[0])
+		}
+	}
+}
+
+// TestBookmarkStartWithoutEnd covers a {\*\bkmkstart} left open at paragraph
+// end: it becomes a point Anchor carrying no marked text.
+func TestBookmarkStartWithoutEnd(t *testing.T) {
+	d := mustParse(t, `{\rtf1 x{\*\bkmkstart open}\par}`)
+	inlines := d.Blocks[0].(richdoc.Paragraph).Inlines
+	last, ok := inlines[len(inlines)-1].(richdoc.Anchor)
+	if !ok {
+		t.Fatalf("expected trailing Anchor, got %#v", inlines)
+	}
+	if last.ID != "open" || len(last.Inlines) != 0 {
+		t.Fatalf("point anchor = %#v, want ID=open, no inlines", last)
+	}
+}
+
+// TestRefFieldEmptyResult covers a REF field with an empty result: the target
+// name stands in for the missing visible text.
+func TestRefFieldEmptyResult(t *testing.T) {
+	d := mustParse(t, `{\rtf1{\field{\*\fldinst REF bm}{\fldrslt }}\par}`)
+	cr, ok := d.Blocks[0].(richdoc.Paragraph).Inlines[0].(richdoc.CrossRef)
+	if !ok {
+		t.Fatalf("expected CrossRef, got %T", d.Blocks[0].(richdoc.Paragraph).Inlines[0])
+	}
+	want := richdoc.CrossRef{Target: "bm", Kind: richdoc.RefLabel, Inlines: []richdoc.Inline{richdoc.Text{Value: "bm"}}}
+	if !reflect.DeepEqual(cr, want) {
+		t.Fatalf("CrossRef = %#v, want %#v", cr, want)
+	}
+}
+
+// TestWriteCitation covers writing a RefCite cross-reference, which RTF can
+// only express best-effort as a CITATION field instruction.
+func TestWriteCitation(t *testing.T) {
+	out, err := Write(richdoc.New().P(richdoc.Cite("key1", richdoc.Txt("Author"))).Doc())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `{\field{\*\fldinst CITATION key1}{\fldrslt Author}}`) {
+		t.Fatalf("citation not emitted: %s", out)
+	}
 }
 
 func TestTrailingTextWithoutPar(t *testing.T) {
