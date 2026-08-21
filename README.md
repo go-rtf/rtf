@@ -50,7 +50,10 @@ The supported subset maps to `richdoc` as follows.
 | `{\pntext…}` / `{\*\pn…}` / `\listtext` / `\ilvl` / `\ls` | `List` / `ListItem` (`\pndec` or a digit marker → ordered, `\pnlvlblt` → unordered) |
 | `\liN` left indent (not a list/heading) | `BlockQuote` |
 | `\brdrb` on an empty paragraph | `ThematicBreak` |
+| `{\footnote …}` (a footnote group, usually after a `\chftn` mark) | `Footnote` (its paragraphs parsed as the note body) |
+| `{\*\bkmkstart name}` … `{\*\bkmkend name}` | `Anchor` (`ID` = name; the marked run becomes its inlines, an empty/unclosed pair a point anchor) |
 | `{\field{\*\fldinst HYPERLINK "url"}{\fldrslt text}}` | `Link` |
+| `{\field{\*\fldinst REF name}{\fldrslt text}}` / `PAGEREF` | `CrossRef{Target:name, Kind:RefLabel}` |
 | `{\fonttbl…}` | read to classify monospace fonts, then dropped |
 | `{\stylesheet…}` | read to resolve heading styles, then dropped |
 | `{\colortbl…}`, `{\info…}`, `{\*\…}` and other unrecognised destinations | consumed and dropped |
@@ -70,6 +73,10 @@ The supported subset maps to `richdoc` as follows.
 | `CodeBlock` | `\pard` monospace lines separated by `\line` |
 | `LineBreak` | `\line` |
 | `Link` | `{\field{\*\fldinst HYPERLINK "url"}{\fldrslt text}}` |
+| `Footnote` | `{\super\chftn}{\footnote … }` (the mark at the reference site, the body as its own group) |
+| `Anchor` | `{\*\bkmkstart ID}…{\*\bkmkend ID}` around its inlines |
+| `CrossRef` (`RefLabel`) | `{\field{\*\fldinst REF Target}{\fldrslt text}}` |
+| `CrossRef` (`RefCite`) | `{\field{\*\fldinst CITATION Target}{\fldrslt text}}` (best-effort; not read back) |
 | `ThematicBreak` | `\pard\brdrb\brdrs\brdrw10 \par` |
 | `MathBlock` | `\pard{\f1 tex}\par` |
 | `Table` | tab-separated `\par` rows (flattened) |
@@ -85,15 +92,16 @@ model cannot represent are preserved verbatim by `Parse` as `RawInline`
 - **Embedded pictures** `{\pict…}` — the model's `Image` only references a URL,
   so pixel data has no home; the whole group (including its hex data) is kept
   raw.
-- **Footnotes** `{\footnote…}` — no footnote node.
-- **Non-hyperlink fields** `{\field…}` (dates, page numbers, references, …) —
-  only `HYPERLINK` maps to `Link`; every other field is kept raw.
+- **Other fields** `{\field…}` — `HYPERLINK` maps to `Link` and `REF`/`PAGEREF`
+  to `CrossRef`; every other field instruction (dates, page numbers, `TOC`, …)
+  is kept raw.
 
-Conversely, a few richdoc nodes have no RTF concept and are written one-way
-(visually faithful, but not reconstructed by `Parse`): `CodeBlock` and
+Conversely, a few richdoc nodes have no faithful RTF concept and are written
+one-way (visually faithful, but not reconstructed by `Parse`): `CodeBlock` and
 `MathBlock` become monospace paragraphs, inline `Math` becomes monospace text,
-`Table` is flattened to tab-separated rows, and `Image` is reduced to its alt
-text.
+`Table` is flattened to tab-separated rows, `Image` is reduced to its alt text,
+and a `RefCite` cross-reference is emitted as a `CITATION` field (which `Parse`
+does not recognise back into a `CrossRef`).
 
 ## Reference library
 

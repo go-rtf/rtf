@@ -216,8 +216,8 @@ func TestParseThematicBreak(t *testing.T) {
 	}
 }
 
-func TestParsePictAndFootnoteAndUnknownFieldAsRaw(t *testing.T) {
-	src := `{\rtf1 img{\pict\wmetafile8 0102}fn{\footnote note}` +
+func TestParsePictAndUnknownFieldAsRaw(t *testing.T) {
+	src := `{\rtf1 img{\pict\wmetafile8 0102}` +
 		`fld{\field{\*\fldinst TIME}{\fldrslt 12:00}}\par}`
 	d := mustParse(t, src)
 	p, ok := d.Blocks[0].(richdoc.Paragraph)
@@ -230,8 +230,8 @@ func TestParsePictAndFootnoteAndUnknownFieldAsRaw(t *testing.T) {
 			raws = append(raws, r)
 		}
 	}
-	if len(raws) != 3 {
-		t.Fatalf("expected 3 RawInline (pict, footnote, field), got %d: %#v", len(raws), p.Inlines)
+	if len(raws) != 2 {
+		t.Fatalf("expected 2 RawInline (pict, field), got %d: %#v", len(raws), p.Inlines)
 	}
 	for _, r := range raws {
 		if r.Format != "rtf" {
@@ -241,11 +241,31 @@ func TestParsePictAndFootnoteAndUnknownFieldAsRaw(t *testing.T) {
 	if !strings.Contains(raws[0].Text, `\pict`) {
 		t.Fatalf("pict raw = %q", raws[0].Text)
 	}
-	if !strings.Contains(raws[1].Text, `\footnote`) {
-		t.Fatalf("footnote raw = %q", raws[1].Text)
+	if !strings.Contains(raws[1].Text, "TIME") {
+		t.Fatalf("field raw = %q", raws[1].Text)
 	}
-	if !strings.Contains(raws[2].Text, "TIME") {
-		t.Fatalf("field raw = %q", raws[2].Text)
+}
+
+// TestParseFootnote checks that a {\footnote …} group becomes an inline
+// Footnote holding the note body rather than a raw passthrough.
+func TestParseFootnote(t *testing.T) {
+	d := mustParse(t, `{\rtf1 Claim{\super\chftn}{\footnote \pard\plain The note body.\par}.\par}`)
+	p, ok := d.Blocks[0].(richdoc.Paragraph)
+	if !ok {
+		t.Fatalf("expected paragraph, got %T", d.Blocks[0])
+	}
+	var fn *richdoc.Footnote
+	for i := range p.Inlines {
+		if f, ok := p.Inlines[i].(richdoc.Footnote); ok {
+			fn = &f
+		}
+	}
+	if fn == nil {
+		t.Fatalf("no Footnote in %#v", p.Inlines)
+	}
+	want := []richdoc.Block{richdoc.Paragraph{Inlines: []richdoc.Inline{richdoc.Text{Value: "The note body."}}}}
+	if !reflect.DeepEqual(fn.Blocks, want) {
+		t.Fatalf("footnote blocks = %#v, want %#v", fn.Blocks, want)
 	}
 }
 
@@ -279,6 +299,11 @@ func TestRoundTripCorpus(t *testing.T) {
 		"{\\rtf1 caf\\u233? \x80 line1\\line line2\\par}",
 		`{\rtf1\pard\li720 A quote\par\pard After\par}`,
 		`{\rtf1 Above\par\pard\brdrb\brdrs \par Below\par}`,
+		`{\rtf1 Claim{\super\chftn}{\footnote \pard\plain The note body.\par}.\par}`,
+		`{\rtf1 see {\*\bkmkstart ref1}marked text{\*\bkmkend ref1} after\par}`,
+		`{\rtf1 point{\*\bkmkstart pt}{\*\bkmkend pt} here\par}`,
+		`{\rtf1 go to {\field{\*\fldinst REF ref1 \h}{\fldrslt the section}}\par}`,
+		`{\rtf1 on {\field{\*\fldinst PAGEREF ref1}{\fldrslt 5}}\par}`,
 	}
 	for _, src := range corpus {
 		first := mustParse(t, src)
